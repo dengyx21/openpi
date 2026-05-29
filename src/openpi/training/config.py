@@ -931,6 +931,162 @@ _CONFIGS = [
         num_train_steps=20_000,
     ),
     #
+    # Fine-tuning config for custom clothes dataset (ALOHA platform).
+    #
+    TrainConfig(
+        # 配置名称，唯一标识。命令行通过 --config-name 引用。
+        name="pi05_clothes",
+
+        # ---- 模型配置 ----
+        # pi05=True: 使用 π₀.₅（知识绝缘训练的升级版 π₀，开世界泛化更好）
+        # action_horizon=16: 每次预测未来 16 步动作序列
+        # discrete_state_input=False: 状态为连续值（关节角度），非离散 token
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=16, discrete_state_input=False),
+
+        # ---- 数据配置 ----
+        data=LeRobotAlohaDataConfig(
+            # LeRobot 数据集 ID，本地缓存路径 ~/.cache/huggingface/lerobot/<repo_id>
+            repo_id="dyx/clothes",
+
+            # 预训练 assets：包含归一化统计量等。asset_id="trossen" 适配 trossen 关节。
+            # assets=AssetsConfig(
+            #     assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+            #     asset_id="trossen",
+            # ),
+            assets=AssetsConfig(
+                assets_dir="/home/dyx/project/openpi/assets/pi05_clothes",
+                asset_id="dyx/clothes",
+            ),
+
+            # 默认任务提示词。数据中无 "prompt" 字段时，训练和推理都使用此文本。
+            default_prompt="fold the clothes",
+
+            # use_delta_joint_actions=True: 关节动作转为相对于当前状态的增量（Delta），
+            # 夹爪保持绝对值。Pi0 预训练使用 Delta 动作，设为 True 与预训练一致。
+            use_delta_joint_actions=True,
+
+            # adapt_to_pi=True: 将标准 ALOHA 关节/夹爪值转换到 Pi0 预训练时的空间
+            # （关节翻转 + 夹爪弧度转换）。使用标准 ALOHA 数据必须设为 True。
+            adapt_to_pi=True,
+
+
+            # 字段重映射：将 LeRobot 数据集字段名映射到 policy 内部期望的字段名。
+            # 你的数据有 cam_high、cam_left_wrist、cam_right_wrist 三个相机（无 cam_low）。
+            # AlohaInputs 检测到缺失的相机会自动用黑色图像 + mask=False 补齐。
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+
+        # ---- 权重加载 ----
+        # weight_loader: JAX 训练用的权重加载器，PyTorch 训练忽略此参数。
+        # 以下两行未设置（使用默认 NoOpWeightLoader），因为 PyTorch 训练通过
+        # pytorch_weight_path 加载权重。
+        #
+        # 如需切回 JAX 训练，取消下面注释：
+        # weight_loader=weight_loaders.CheckpointWeightLoader(
+        #     "gs://openpi-assets/checkpoints/pi05_base/params"
+        # ),
+
+        # ---- PyTorch 权重路径 ----
+        # PyTorch 训练从此路径加载 model.safetensors。
+        # 这里直接使用 HuggingFace 上 lerobot/pi05_base 的本地缓存，已是 PT 格式无需转换。
+        # 如需从 JAX checkpoint 转换：
+        #   uv run examples/convert_jax_model_to_pytorch.py \
+        #       --config_name pi05_clothes \
+        #       --checkpoint_dir gs://openpi-assets/checkpoints/pi05_base \
+        #       --output_path /path/to/output
+        pytorch_weight_path="/home/dyx/ocean/huggingface_cache/hub/models--lerobot--pi05_base/snapshots/9e55186ad36e66b95cda57bc47818d9e6237ae30",
+
+        # ---- PyTorch 训练精度 ----
+        # "bfloat16" 省显存、快，但损失略高；"float32" 精度高但显存翻倍。
+        # 130 条小数据集 bfloat16 足够，且 PyTorch 暂不支持混合精度。
+        pytorch_training_precision="bfloat16",
+
+        # ---- 训练步数 ----
+        # 130 条数据 × 1800 帧/条 = 234,000 帧。50 epoch 需 50×234000/256 ≈ 45,700 步。
+        num_train_steps=30_000,
+
+        # ---- 批次大小 ----
+        # 每张 GPU 的 batch size。多卡时有效 batch = batch_size × GPU 数量。
+        # 根据 GPU 显存调整：
+        #   RTX 4090 (24GB): 建议 16~32
+        #   A100 (80GB): 建议 64~128
+        # 太小则梯度噪声大，太大则可能过拟合小数据集。
+        batch_size=128,
+
+        # ---- 多卡训练 ----
+        # fsdp_devices: JAX 的模型并行（FSDP），PyTorch 训练不使用此参数。
+        #   设为 N 表示将模型切分到 N 张卡，配合数据并行使用。
+        #   例如总共 4 张卡、fsdp_devices=2：模型分 2 组，每组内 2 卡做模型并行，
+        #   组间做数据并行。设为 1 即纯数据并行。
+        #   ⚠️ PyTorch 暂不支持 FSDP，多卡请用下面的 torchrun 方式。
+        fsdp_devices=1,
+
+        # PyTorch 多卡训练：通过 torchrun 启动，batch_size 为 每 GPU 的 batch。
+        # 单卡：
+        #   uv run scripts/train_pytorch.py pi05_clothes --exp_name clothes_exp
+        # 单机多卡（如 4 卡）：
+        #   uv run torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+        #       scripts/train_pytorch.py pi05_clothes --exp_name clothes_exp
+        # 多机多卡（2 节点，每节点 8 卡）：
+        #   uv run torchrun --nnodes=2 --nproc_per_node=8 \
+        #       --node_rank=0 --master_addr=<master_ip> --master_port=29500 \
+        #       scripts/train_pytorch.py pi05_clothes --exp_name clothes_exp
+
+        # ---- 学习率调度 ----
+        # CosineDecaySchedule: 余弦衰减 + warmup。
+        # warmup_steps=1000: 前 1000 步从 0 线性升到 peak_lr。
+        # peak_lr=5e-5: 峰值学习率。
+        # decay_steps=44_000: 总步数 - warmup，后期学习率降到 decay_lr。
+        # decay_lr=1e-6: 接近 0，帮助后期精细收敛。
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=29_000,
+            decay_lr=1e-5,
+        ),
+
+        # ---- 优化器 ----
+        # AdamW: 带权重衰减的 Adam。clip_gradient_norm=1.0 防止梯度爆炸。
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+
+        # ---- EMA 指数移动平均 ----
+        # 训练时维护模型参数平滑版本，提升推理稳定性和泛化。
+        # 0.999 意味每步 EMA = 0.999×旧EMA + 0.001×当前参数（约 1000 步后追上）。
+        # ⚠️  当前 PyTorch 训练不支持 EMA，此参数在 PyTorch 训练中被忽略。
+        ema_decay=0.999,
+
+        # ---- 日志与保存 ----
+        # wandb 可视化训练曲线。离线环境请设为 False。
+        wandb_enabled=True,
+
+        # 每 2000 步保存一次 checkpoint，方便选择最佳模型。
+        save_interval=2_000,
+
+        # 每 5000 步的 checkpoint 永久保留，其余可能被清理。
+        keep_period=5_000,
+
+        # ---- 其他 ----
+        # 随机种子，固定后可复现训练结果。
+        seed=42,
+
+        # 数据加载子进程数。设大点加快数据加载，但占更多 CPU 和内存。
+        num_workers=4,
+    ),
+    #
     # Debugging configs.
     #
     TrainConfig(

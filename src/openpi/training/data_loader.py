@@ -127,6 +127,42 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+# class TimeWeightedDataset(Dataset):
+#     """Oversample frames in a specified relative position range within each episode.
+
+#     Frames in [start_frac, end_frac) of each episode are duplicated ``weight`` times
+#     in the index list. The wrapped dataset appears as a larger dataset where the target
+#     range is naturally oversampled during uniform shuffling.
+#     """
+
+#     def __init__(
+#         self,
+#         dataset: Dataset,
+#         start_frac: float = 0.5,
+#         end_frac: float = 0.75,
+#         weight: float = 3.0,
+#     ):
+#         self._dataset = dataset
+#         ep_data_index = dataset.episode_data_index
+
+#         self._indices = []
+#         for ep_id in range(len(ep_data_index["from"])):
+#             start = ep_data_index["from"][ep_id].item()
+#             end = ep_data_index["to"][ep_id].item()
+#             ep_len = end - start
+
+#             for frame_idx in range(start, end):
+#                 rel_pos = frame_idx / ep_len if ep_len > 1 else 0.0
+#                 count = int(weight) if start_frac <= rel_pos < end_frac else 1
+#                 self._indices.extend([frame_idx] * count)
+
+#     def __getitem__(self, index: SupportsIndex) -> dict:
+#         return self._dataset[self._indices[index.__index__()]]
+
+#     def __len__(self) -> int:
+#         return len(self._indices)
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -147,6 +183,14 @@ def create_torch_dataset(
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+
+    # if data_config.time_weight != 1.0:
+    #     dataset = TimeWeightedDataset(
+    #         dataset,
+    #         start_frac=data_config.time_weight_start,
+    #         end_frac=data_config.time_weight_end,
+    #         weight=data_config.time_weight,
+    #     )
 
     return dataset
 
